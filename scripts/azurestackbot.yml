@@ -1,0 +1,168 @@
+name: AzureStackBot
+#This workflow queries resources running on Azure Stack HCI and updates the server-request.yml file with dynamic options for dropdowns.
+
+on:
+#  schedule:
+#   - cron: '0 0 * * *'  # Runs daily at midnight
+  workflow_dispatch:  # Allows manual triggering of the workflow
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  QueryAzureStackHCI:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true  # Ensure the credentials are persisted
+
+      - name: Set up Azure CLI
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.ARM_CLIENT_ID }}
+          tenant-id: ${{ vars.ARM_TENANT_ID }}
+          subscription-id: ${{ vars.ARM_SUBSCRIPTION_ID }}
+
+      - name: Azure Stack HCI Logical Networks
+        id: query-networks
+        shell: pwsh
+        run: |
+          az config set extension.use_dynamic_install=yes_without_prompt
+          Install-Module -Name powershell-yaml -Force -Scope CurrentUser
+          Write-Output "Installing Azure Stack HCI extension..."
+          $logicalNetworks = az stack-hci-vm network lnet list --query '[].id' -o tsv
+          Write-Output "Logical networks found..."
+          $options = @()  # Initialize as an array
+          foreach ($lnetId in $logicalNetworks) {
+            $lnetDetails = az stack-hci-vm network lnet show --ids $lnetId --query 'properties.subnets' -o json | ConvertFrom-Json
+            foreach ($subnet in $lnetDetails) {
+              $subnetName = $subnet.name
+              $addressPrefix = $subnet.properties.addressPrefix
+              Write-Output "Subnet Name: $subnetName, Address Prefix: $addressPrefix"
+              $options += "$subnetName, $addressPrefix"
+            }
+          }
+          $yamlOptions = $options | Select-Object -Unique | ConvertTo-Yaml
+          $yamlOptions = $yamlOptions -replace "`n", "`n        "  # Add 8 spaces before each new line
+          # Split the YAML options into an array of lines
+          $yamlOptionsArray = $yamlOptions -split "`n"
+
+          # Check if the last line is empty and remove it if it is
+          if ($yamlOptionsArray[-1].Trim() -eq "") {
+            $yamlOptionsArray = $yamlOptionsArray[0..($yamlOptionsArray.Length - 2)]
+          }
+
+          # Join the array back into a single string
+          $yamlOptions = $yamlOptionsArray -join "`n"
+
+          Write-Output "Defaulting server-request.yml to server-request-default.yml..."
+          Copy-Item -Path .github/bots/azurestackbot/server-request-default.yml -Destination .github/ISSUE_TEMPLATE/server-request.yml -Force
+          Write-Output "Updating server-request.yml..."
+
+          $serverRequestYml = Get-Content .github/ISSUE_TEMPLATE/server-request.yml
+          $serverRequestYml = $serverRequestYml -replace '- NETWORK PLACEHOLDER', "$yamlOptions"
+          Set-Content .github/ISSUE_TEMPLATE/server-request.yml -Value $serverRequestYml
+          Write-Output "server-request.yml updated successfully."
+
+      - name: Azure Stack HCI Maintenance Configurations
+        id: query-maintenance
+        shell: pwsh
+        run: |
+            Write-Output "Looking for Maintenance Configurations..."
+            $options = @()  # Initialize as an array
+            $maintenanceConfigurations = az resource list --resource-group maintenance-configurations --resource-type Microsoft.Maintenance/maintenanceConfigurations --query "[].name"  -o tsv
+            foreach ($config in $maintenanceConfigurations) {
+              Write-Output "Found maintenance configuration: $config"
+              $options += "$config"
+            }
+            $yamlOptions = $options | Select-Object -Unique | ConvertTo-Yaml
+            $yamlOptions = $yamlOptions -replace "`n", "`n        "  # Add 8 spaces before each new line
+            # Split the YAML options into an array of lines
+            $yamlOptionsArray = $yamlOptions -split "`n"
+
+            # Check if the last line is empty and remove it if it is
+            if ($yamlOptionsArray[-1].Trim() -eq "") {
+            $yamlOptionsArray = $yamlOptionsArray[0..($yamlOptionsArray.Length - 2)]
+            }
+
+            # Join the array back into a single string
+            $yamlOptions = $yamlOptionsArray -join "`n"
+
+            Write-Output "Updating server-request.yml..."
+            $serverRequestYml = Get-Content .github/ISSUE_TEMPLATE/server-request.yml
+            $serverRequestYml = $serverRequestYml -replace '- MAINTENANCE PLACEHOLDER', "$yamlOptions"
+            Set-Content .github/ISSUE_TEMPLATE/server-request.yml -Value $serverRequestYml
+            Write-Output "server-request.yml updated successfully with maintenance configurations."
+
+      - name: Azure Stack HCI VM Images
+        id: query-images
+        shell: pwsh
+        run: |
+          Write-Output "Looking for Images on Azure Stack..."
+          $options = @()  # Initialize as an array
+          $galleryImages = az resource list --resource-type microsoft.azurestackhci/marketplacegalleryimages --query "[].{Name:name, ResourceGroup:resourceGroup}" --output json | ConvertFrom-Json
+          foreach ($image in $galleryImages) {
+            $resourceGroupName = $image.ResourceGroup
+            $resourceName = $image.Name
+            $resourceDetails = az resource show --resource-group $resourceGroupName --name $resourceName --resource-type microsoft.azurestackhci/marketplacegalleryimages --output json | ConvertFrom-Json
+            foreach ($detail in $resourceDetails) {
+              $sku = $($resourceDetails.properties.identifier.sku)
+              Write-Output "Found image: $sku"
+              $options += "$sku"
+            }
+          }
+          $yamlOptions = $options | Select-Object -Unique | ConvertTo-Yaml
+          $yamlOptions = $yamlOptions -replace "`n", "`n        "  # Add 8 spaces before each new line
+          # Split the YAML options into an array of lines
+          $yamlOptionsArray = $yamlOptions -split "`n"
+
+          # Check if the last line is empty and remove it if it is
+          if ($yamlOptionsArray[-1].Trim() -eq "") {
+            $yamlOptionsArray = $yamlOptionsArray[0..($yamlOptionsArray.Length - 2)]
+          }
+
+          # Join the array back into a single string
+          $yamlOptions = $yamlOptionsArray -join "`n"
+          Write-Output "Updating server-request.yml..."
+          $serverRequestYml = Get-Content .github/ISSUE_TEMPLATE/server-request.yml
+          $serverRequestYml = $serverRequestYml -replace '- OS PLACEHOLDER', "$yamlOptions"
+          Set-Content .github/ISSUE_TEMPLATE/server-request.yml -Value $serverRequestYml
+          Write-Output "server-request.yml updated successfully with maintenance configurations."
+
+      - name: Create Pull Request
+        id: cpr
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "AzureStackBot: queried Azure Stack HCI resources and updated server-request.yml"
+          branch: update-server-request
+          branch-suffix: random
+          title: "AzureStackBot: Update Issue Template with Dynamic Options"
+          body-path: ./.github/bots/azurestackbot/azurestackbot-pr-body.md
+          labels: "automation"
+          draft: always-true
+          delete-branch: true
+
+      - name: Check outputs
+        if: ${{ steps.cpr.outputs.pull-request-number }}
+        run: |
+            echo "Pull Request Number - ${{ steps.cpr.outputs.pull-request-number }}"
+            echo "Pull Request URL - ${{ steps.cpr.outputs.pull-request-url }}"
+            echo "Pull Request Branch Name - ${{ steps.cpr.outputs.pull-request-branch }}"
+
+      - name: Commit and push server-request.yml
+        id: commit-and-push
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git checkout ${{ steps.cpr.outputs.pull-request-branch }}
+          git add .github/ISSUE_TEMPLATE/server-request.yml
+          git commit -m "Update server-request.yml with dynamic options"
+          git push -u origin ${{ steps.cpr.outputs.pull-request-branch }} --force
